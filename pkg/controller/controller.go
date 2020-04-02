@@ -1,7 +1,12 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
+	"io/ioutil"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -12,8 +17,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	api_v1 "k8s.io/api/core/v1"
+	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
@@ -25,43 +30,48 @@ type Controller struct {
 	eventHandler Handler
 }
 
-type Event struct {
-	key          string
-	eventType    string
-	namespace    string
-	resourceType string
-}
-
 const maxRetries = 5
 
 func New(clientset kubernetes.Interface) *Controller {
-	logrus.Info("New")
+	logger := logrus.WithField("pkg", "config-getter")
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
+	// TODO: is it possible to filter CMs here by annotation?
 	informer := cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
-				return clientset.CoreV1().Pods(meta_v1.NamespaceAll).List(options)
+				return clientset.CoreV1().ConfigMaps(meta_v1.NamespaceAll).List(options)
 			},
 			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
-				return clientset.CoreV1().Pods(meta_v1.NamespaceAll).Watch(options)
+				return clientset.CoreV1().ConfigMaps(meta_v1.NamespaceAll).Watch(options)
 			},
 		},
-		&api_v1.Pod{},
+		&api_v1.ConfigMap{},
 		0, //Skip resync
 		cache.Indexers{},
 	)
+	// TODO: only queue if CM doesn't have specified key in data
 	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(obj)
-			logrus.WithField("pkg", "kubewatch-").Infof("Processing add to %s", key)
+			logger.Infof("Processing add for %s", key)
 			if err == nil {
 				queue.Add(key)
 			}
 		},
 		UpdateFunc: func(old, new interface{}) {
+			oldCM := old.(*api_v1.ConfigMap)
+			oldAnnotation, present := oldCM.GetAnnotations()["x-k8s-io/curl-me-that"]
+			if present {
+				newCM := new.(*api_v1.ConfigMap)
+				newAnnotation, _ := newCM.GetAnnotations()["x-k8s-io/curl-me-that"]
+				if oldAnnotation == newAnnotation {
+					logger.Infof("old %s and new %s are same, skipping", oldAnnotation, newAnnotation)
+					return
+				}
+			}
 			key, err := cache.MetaNamespaceKeyFunc(old)
-			logrus.WithField("pkg", "kubewatch-").Infof("Processing update to %s", key)
+			logger.Infof("Processing update for %s", key)
 			if err == nil {
 				queue.Add(key)
 			}
@@ -69,11 +79,11 @@ func New(clientset kubernetes.Interface) *Controller {
 	})
 
 	controller := &Controller{
-		logger:       logrus.WithField("pkg", "kubewatch-"),
+		logger:       logger,
 		clientset:    clientset,
 		queue:        queue,
 		informer:     informer,
-		eventHandler: &ConfigGetter{},
+		eventHandler: &ConfigGetter{logger, clientset},
 	}
 
 	return controller
@@ -82,62 +92,46 @@ func New(clientset kubernetes.Interface) *Controller {
 // Run will start the controller.
 // StopCh channel is used to send interrupt signal to stop it.
 func (c *Controller) Run(stopCh <-chan struct{}) {
-	c.logger.Info("Run")
-	// don't let panics crash the process
 	defer utilruntime.HandleCrash()
-	// make sure the work queue is shutdown which will trigger workers to end
 	defer c.queue.ShutDown()
 
-	c.logger.Info("Starting kubewatch controller")
+	c.logger.Info("Starting controller")
 
 	go c.informer.Run(stopCh)
 
-	// wait for the caches to synchronize before starting the worker
 	if !cache.WaitForCacheSync(stopCh, c.HasSynced) {
 		utilruntime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
 		return
 	}
 
-	c.logger.Info("Kubewatch controller synced and ready")
+	c.logger.Info("Controller synced and ready")
 
-	// runWorker will loop until "something bad" happens.  The .Until will
-	// then rekick the worker after one second
 	wait.Until(c.runWorker, time.Second, stopCh)
 }
 
 func (c *Controller) runWorker() {
 	for c.processNextItem() {
-		// continue looping
-	        c.logger.Info("Processed item")
 	}
 }
 
-// processNextWorkItem deals with one key off the queue.  It returns false
+// processNextItem deals with one key off the queue.  It returns false
 // when it's time to quit.
 func (c *Controller) processNextItem() bool {
-	// pull the next work item from queue.  It should be a key we use to lookup
-	// something in a cache
 	key, quit := c.queue.Get()
 	if quit {
 		return false
 	}
 
-	// you always have to indicate to the queue that you've completed a piece of
-	// work
 	defer c.queue.Done(key)
 
-	// do your work on the key.
 	err := c.processItem(key.(string))
 
 	if err == nil {
-		// No error, tell the queue to stop tracking history
 		c.queue.Forget(key)
 	} else if c.queue.NumRequeues(key) < maxRetries {
 		c.logger.Errorf("Error processing %s (will retry): %v", key, err)
-		// requeue the item to work on later
 		c.queue.AddRateLimited(key)
 	} else {
-		// err != nil and too many retries
 		c.logger.Errorf("Error processing %s (giving up): %v", key, err)
 		c.queue.Forget(key)
 		utilruntime.HandleError(err)
@@ -147,19 +141,15 @@ func (c *Controller) processNextItem() bool {
 }
 
 func (c *Controller) processItem(key string) error {
-	c.logger.Infof("Processing change to Pod %s", key)
-
 	obj, exists, err := c.informer.GetIndexer().GetByKey(key)
 	if err != nil {
 		return fmt.Errorf("Error fetching object with key %s from store: %v", key, err)
 	}
-
 	if !exists {
-		c.eventHandler.ObjectDeleted(obj)
 		return nil
 	}
 
-	c.eventHandler.ObjectCreated(obj)
+	c.eventHandler.Process(obj)
 	return nil
 }
 
@@ -169,15 +159,82 @@ func (c *Controller) HasSynced() bool {
 }
 
 type Handler interface {
-	ObjectCreated(interface {})
-	ObjectDeleted(interface {})
+	Process(interface{})
 }
 
-type ConfigGetter struct {}
-func (cg *ConfigGetter) ObjectCreated(obj interface{}) {
-	fmt.Printf("created %#v\n", obj)
+type ConfigGetter struct {
+	logger    *logrus.Entry
+	clientset kubernetes.Interface
 }
 
-func (cg *ConfigGetter) ObjectDeleted(obj interface{}) {
-	fmt.Printf("deleted %#v\n", obj)
+func (cg *ConfigGetter) Process(obj interface{}) {
+	cm := obj.(*api_v1.ConfigMap)
+	cg.logger.Infof("Processing %s\n", cm.GetName())
+
+	annotations := cm.GetAnnotations()
+	curl, ok := annotations["x-k8s-io/curl-me-that"]
+	if !ok {
+		cg.logger.Infof("No matching annotation found for %s", cm.GetName())
+		return
+	}
+	key, url := parseAnnotation(curl)
+	validatedURL, err := validateUrl(url)
+	cg.logger.Infof("validatedURL %s\n", validatedURL)
+	if err != nil {
+		cg.logger.Errorf("Could not parse URL %s: %s", url, err.Error())
+		return
+	}
+	resp, err := http.Get(validatedURL)
+	if err != nil {
+		// TODO: think about this. Store in CM somewhere
+		cg.logger.Warnf("Failed to fetch URL %s", url)
+		return
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		cg.logger.Errorf(err.Error())
+		return
+	}
+	bodyString := string(body)
+	if data, exists := cm.Data[key]; exists {
+		if data == bodyString {
+			cg.logger.Info("No need to change key")
+			return
+		}
+		cg.logger.Warnf("Overwriting key %s for %s", key, cm.GetName())
+	}
+
+	updated := cm.DeepCopy()
+	data := updated.Data
+	if data == nil {
+		updated.Data = make(map[string]string)
+	}
+
+	updated.Data[key] = bodyString
+	_, err = cg.clientset.CoreV1().ConfigMaps(cm.GetNamespace()).Update(updated)
+	if err != nil {
+		cg.logger.Errorf("Error updating ConfigMap %s: %#v", updated.GetName(), err)
+	}
+}
+
+func parseAnnotation(annotation string) (string, string) {
+	x := strings.Split(annotation, "=")
+	return x[0], x[1]
+}
+
+func validateUrl(path string) (string, error) {
+	u, err := url.Parse(path)
+	if err != nil {
+		return "", err
+	}
+	fmt.Printf("%#v\n", u)
+	if u.Path == "" {
+		return "", errors.New("no URL path")
+	}
+	if u.Scheme == "" {
+		u.Scheme = "http://"
+	}
+
+	return u.Scheme + u.Path, nil
 }

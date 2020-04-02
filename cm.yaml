@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: matching
+  annotations:
+    x-k8s-io/curl-me-that: joke=curl-a-joke.herokuapp.com
+data: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: not-matching
+  annotations:
+    x-that: joke=curl-a-joke.herokuapp.com
+data: {}

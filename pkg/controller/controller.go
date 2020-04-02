@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -50,12 +49,11 @@ func New(clientset kubernetes.Interface) *Controller {
 		0, //Skip resync
 		cache.Indexers{},
 	)
-	// TODO: only queue if CM doesn't have specified key in data
 	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(obj)
-			logger.Infof("Processing add for %s", key)
 			if err == nil {
+				logger.Infof("Processing add for %s", key)
 				queue.Add(key)
 			}
 		},
@@ -66,13 +64,12 @@ func New(clientset kubernetes.Interface) *Controller {
 				newCM := new.(*api_v1.ConfigMap)
 				newAnnotation, _ := newCM.GetAnnotations()["x-k8s-io/curl-me-that"]
 				if oldAnnotation == newAnnotation {
-					logger.Infof("old %s and new %s are same, skipping", oldAnnotation, newAnnotation)
 					return
 				}
 			}
 			key, err := cache.MetaNamespaceKeyFunc(old)
-			logger.Infof("Processing update for %s", key)
 			if err == nil {
+				logger.Infof("Processing update for %s", key)
 				queue.Add(key)
 			}
 		},
@@ -89,18 +86,16 @@ func New(clientset kubernetes.Interface) *Controller {
 	return controller
 }
 
-// Run will start the controller.
-// StopCh channel is used to send interrupt signal to stop it.
 func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
 
-	c.logger.Info("Starting controller")
+	c.logger.Info("Starting config-getter controller")
 
 	go c.informer.Run(stopCh)
 
 	if !cache.WaitForCacheSync(stopCh, c.HasSynced) {
-		utilruntime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
+		utilruntime.HandleError(fmt.Errorf("Time out waiting for cache sync"))
 		return
 	}
 
@@ -114,8 +109,6 @@ func (c *Controller) runWorker() {
 	}
 }
 
-// processNextItem deals with one key off the queue.  It returns false
-// when it's time to quit.
 func (c *Controller) processNextItem() bool {
 	key, quit := c.queue.Get()
 	if quit {
@@ -149,6 +142,7 @@ func (c *Controller) processItem(key string) error {
 		return nil
 	}
 
+	// TODO: return error from Process
 	c.eventHandler.Process(obj)
 	return nil
 }
@@ -169,25 +163,26 @@ type ConfigGetter struct {
 
 func (cg *ConfigGetter) Process(obj interface{}) {
 	cm := obj.(*api_v1.ConfigMap)
-	cg.logger.Infof("Processing %s\n", cm.GetName())
 
-	annotations := cm.GetAnnotations()
-	curl, ok := annotations["x-k8s-io/curl-me-that"]
-	if !ok {
-		cg.logger.Infof("No matching annotation found for %s", cm.GetName())
+	// Validate URL in annotation
+	requestedURL, present := cm.GetAnnotations()["x-k8s-io/curl-me-that"]
+	if !present {
+		cg.logger.Infof("No curl-me-that annotation found for %s", cm.GetName())
 		return
 	}
-	key, url := parseAnnotation(curl)
+
+	key, url := parseAnnotation(requestedURL)
 	validatedURL, err := validateUrl(url)
-	cg.logger.Infof("validatedURL %s\n", validatedURL)
 	if err != nil {
 		cg.logger.Errorf("Could not parse URL %s: %s", url, err.Error())
 		return
 	}
+
+	// Fetch URL
 	resp, err := http.Get(validatedURL)
 	if err != nil {
 		// TODO: think about this. Store in CM somewhere
-		cg.logger.Warnf("Failed to fetch URL %s", url)
+		cg.logger.Errorf("Failed to fetch URL %s", url)
 		return
 	}
 	defer resp.Body.Close()
@@ -196,22 +191,17 @@ func (cg *ConfigGetter) Process(obj interface{}) {
 		cg.logger.Errorf(err.Error())
 		return
 	}
-	bodyString := string(body)
-	if data, exists := cm.Data[key]; exists {
-		if data == bodyString {
-			cg.logger.Info("No need to change key")
-			return
-		}
-		cg.logger.Warnf("Overwriting key %s for %s", key, cm.GetName())
-	}
 
+	// Write URL to data
 	updated := cm.DeepCopy()
 	data := updated.Data
 	if data == nil {
 		updated.Data = make(map[string]string)
 	}
+	updated.Data[key] = string(body)
 
-	updated.Data[key] = bodyString
+	// Save changes to ConfigMap
+	cg.logger.Infof("Updating data key %s for %s", key, cm.GetName())
 	_, err = cg.clientset.CoreV1().ConfigMaps(cm.GetNamespace()).Update(updated)
 	if err != nil {
 		cg.logger.Errorf("Error updating ConfigMap %s: %#v", updated.GetName(), err)
@@ -228,13 +218,12 @@ func validateUrl(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("%#v\n", u)
 	if u.Path == "" {
-		return "", errors.New("no URL path")
+		return "", fmt.Errorf("no path in %s", path)
 	}
 	if u.Scheme == "" {
-		u.Scheme = "http://"
+		u.Scheme = "http"
 	}
 
-	return u.Scheme + u.Path, nil
+	return u.String(), nil
 }

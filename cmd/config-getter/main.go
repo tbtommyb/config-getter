@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	controller "github.com/tbtommyb/config-getter/pkg/controller"
+	getter "github.com/tbtommyb/config-getter/pkg/getter"
 )
 
 func main() {
@@ -28,7 +29,9 @@ func main() {
 		logrus.Fatalf("Can not get kubernetes config: %v", err)
 	}
 
-	cont := controller.New(clientset)
+	handler := &controller.AnnotationGetter{Getter: getter.NewHTTPGetter()}
+
+	cont := controller.New(clientset, handler)
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 

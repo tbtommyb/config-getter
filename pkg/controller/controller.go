@@ -2,10 +2,6 @@ package controller
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -21,6 +17,10 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
+type Handler interface {
+	Process(*api_v1.ConfigMap) (*api_v1.ConfigMap, error)
+}
+
 type Controller struct {
 	logger       *logrus.Entry
 	clientset    kubernetes.Interface
@@ -31,7 +31,7 @@ type Controller struct {
 
 const maxRetries = 5
 
-func New(clientset kubernetes.Interface) *Controller {
+func New(clientset kubernetes.Interface, handler Handler) *Controller {
 	logger := logrus.WithField("pkg", "config-getter")
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
@@ -80,7 +80,7 @@ func New(clientset kubernetes.Interface) *Controller {
 		clientset:    clientset,
 		queue:        queue,
 		informer:     informer,
-		eventHandler: &ConfigGetter{logger, clientset},
+		eventHandler: handler,
 	}
 
 	return controller
@@ -136,94 +136,24 @@ func (c *Controller) processNextItem() bool {
 func (c *Controller) processItem(key string) error {
 	obj, exists, err := c.informer.GetIndexer().GetByKey(key)
 	if err != nil {
-		return fmt.Errorf("Error fetching object with key %s from store: %v", key, err)
+		return err
 	}
 	if !exists {
-		return nil
+		return fmt.Errorf("key %s does not exist in store", key)
 	}
 
-	// TODO: return error from Process
-	c.eventHandler.Process(obj)
-	return nil
+	updated, err := c.eventHandler.Process(obj.(*api_v1.ConfigMap))
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		return nil
+	}
+	_, err = c.clientset.CoreV1().ConfigMaps(updated.GetNamespace()).Update(updated)
+	return err
 }
 
 // HasSynced is required for the cache.Controller interface.
 func (c *Controller) HasSynced() bool {
 	return c.informer.HasSynced()
-}
-
-type Handler interface {
-	Process(interface{})
-}
-
-type ConfigGetter struct {
-	logger    *logrus.Entry
-	clientset kubernetes.Interface
-}
-
-func (cg *ConfigGetter) Process(obj interface{}) {
-	cm := obj.(*api_v1.ConfigMap)
-
-	// Validate URL in annotation
-	requestedURL, present := cm.GetAnnotations()["x-k8s-io/curl-me-that"]
-	if !present {
-		cg.logger.Infof("No curl-me-that annotation found for %s", cm.GetName())
-		return
-	}
-
-	key, url := parseAnnotation(requestedURL)
-	validatedURL, err := validateUrl(url)
-	if err != nil {
-		cg.logger.Errorf("Could not parse URL %s: %s", url, err.Error())
-		return
-	}
-
-	// Fetch URL
-	resp, err := http.Get(validatedURL)
-	if err != nil {
-		// TODO: think about this. Store in CM somewhere
-		cg.logger.Errorf("Failed to fetch URL %s", url)
-		return
-	}
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		cg.logger.Errorf(err.Error())
-		return
-	}
-
-	// Write URL to data
-	updated := cm.DeepCopy()
-	data := updated.Data
-	if data == nil {
-		updated.Data = make(map[string]string)
-	}
-	updated.Data[key] = string(body)
-
-	// Save changes to ConfigMap
-	cg.logger.Infof("Updating data key %s for %s", key, cm.GetName())
-	_, err = cg.clientset.CoreV1().ConfigMaps(cm.GetNamespace()).Update(updated)
-	if err != nil {
-		cg.logger.Errorf("Error updating ConfigMap %s: %#v", updated.GetName(), err)
-	}
-}
-
-func parseAnnotation(annotation string) (string, string) {
-	x := strings.Split(annotation, "=")
-	return x[0], x[1]
-}
-
-func validateUrl(path string) (string, error) {
-	u, err := url.Parse(path)
-	if err != nil {
-		return "", err
-	}
-	if u.Path == "" {
-		return "", fmt.Errorf("no path in %s", path)
-	}
-	if u.Scheme == "" {
-		u.Scheme = "http"
-	}
-
-	return u.String(), nil
 }

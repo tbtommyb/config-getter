@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -17,17 +18,25 @@ type ResourceGetter interface {
 }
 
 func (cg *AnnotationGetter) Process(cm *api_v1.ConfigMap) (*api_v1.ConfigMap, error) {
-	requestedURL, present := cm.GetAnnotations()["x-k8s-io/curl-me-that"]
+	annotation, present := cm.GetAnnotations()["x-k8s-io/curl-me-that"]
 	if !present {
 		return nil, nil
 	}
 
-	key, url, err := parseAnnotation(requestedURL)
+	key, url, err := parseAnnotation(annotation)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse %s: %w", requestedURL, err)
+		return nil, fmt.Errorf("could not parse annotation %s: %w", annotation, err)
 	}
 
-	body, err := cg.Getter.Get(url)
+	validatedURL, err := validateUrl(url)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse URL %s: %w", url, err)
+	}
+	body, err := cg.Getter.Get(validatedURL)
+	if err != nil {
+		// TODO: replace with better error-handling
+		return nil, fmt.Errorf("could not fetch %s", validatedURL)
+	}
 
 	updated := cm.DeepCopy()
 	data := updated.Data
@@ -49,4 +58,21 @@ func parseAnnotation(annotation string) (string, string, error) {
 	}
 	x := strings.Split(annotation, "=")
 	return x[0], x[1], nil
+}
+
+func validateUrl(path string) (string, error) {
+	if !(strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://")) {
+		path = "https://" + path
+	}
+
+	u, err := url.Parse(path)
+	if err != nil {
+		return "", err
+	}
+
+	if u.Host == "" {
+		return "", fmt.Errorf("no host in %v", u)
+	}
+
+	return u.String(), nil
 }

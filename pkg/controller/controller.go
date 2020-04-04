@@ -9,11 +9,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
 	api_v1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
@@ -23,15 +27,17 @@ type Handler interface {
 
 type Controller struct {
 	logger       *logrus.Entry
-	clientset    kubernetes.Interface
+	Clientset    kubernetes.Interface
 	queue        workqueue.RateLimitingInterface
 	informer     cache.SharedIndexInformer
 	eventHandler Handler
+	HasSynced    cache.InformerSynced
+	recorder     record.EventRecorder
 }
 
 const maxRetries = 5
 
-func New(clientset kubernetes.Interface, handler Handler) *Controller {
+func New(Clientset kubernetes.Interface, handler Handler) *Controller {
 	logger := logrus.WithField("pkg", "config-getter")
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
@@ -39,10 +45,10 @@ func New(clientset kubernetes.Interface, handler Handler) *Controller {
 	informer := cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
-				return clientset.CoreV1().ConfigMaps(meta_v1.NamespaceAll).List(options)
+				return Clientset.CoreV1().ConfigMaps(meta_v1.NamespaceAll).List(options)
 			},
 			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
-				return clientset.CoreV1().ConfigMaps(meta_v1.NamespaceAll).Watch(options)
+				return Clientset.CoreV1().ConfigMaps(meta_v1.NamespaceAll).Watch(options)
 			},
 		},
 		&api_v1.ConfigMap{},
@@ -75,12 +81,19 @@ func New(clientset kubernetes.Interface, handler Handler) *Controller {
 		},
 	})
 
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartLogging(logger.Infof)
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: Clientset.CoreV1().Events("")})
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, api_v1.EventSource{Component: "config-getter-controller"})
+
 	controller := &Controller{
 		logger:       logger,
-		clientset:    clientset,
+		Clientset:    Clientset,
 		queue:        queue,
 		informer:     informer,
 		eventHandler: handler,
+		HasSynced:    informer.HasSynced,
+		recorder:     recorder,
 	}
 
 	return controller
@@ -114,18 +127,28 @@ func (c *Controller) processNextItem() bool {
 	if quit {
 		return false
 	}
-
 	defer c.queue.Done(key)
 
-	err := c.processItem(key.(string))
+	obj, exists, err := c.informer.GetIndexer().GetByKey(key.(string))
+	if err != nil {
+		c.logger.Errorf("get by key error %s: %w", key, err)
+		return true
+	}
+	if !exists {
+		c.logger.Errorf("key %s does not exist in store", key)
+		return true
+	}
+
+	cm := obj.(*api_v1.ConfigMap)
+	err = c.processItem(cm)
 
 	if err == nil {
 		c.queue.Forget(key)
 	} else if c.queue.NumRequeues(key) < maxRetries {
-		c.logger.Errorf("Error processing %s (will retry): %v", key, err)
+		c.recorder.Eventf(cm, api_v1.EventTypeWarning, "GetFailure", "Error processing %s (will retry): %v", key, err)
 		c.queue.AddRateLimited(key)
 	} else {
-		c.logger.Errorf("Error processing %s (giving up): %v", key, err)
+		c.recorder.Eventf(cm, api_v1.EventTypeWarning, "GetFailure", "Error processing %s (giving up): %v", key, err)
 		c.queue.Forget(key)
 		utilruntime.HandleError(err)
 	}
@@ -133,27 +156,14 @@ func (c *Controller) processNextItem() bool {
 	return true
 }
 
-func (c *Controller) processItem(key string) error {
-	obj, exists, err := c.informer.GetIndexer().GetByKey(key)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return fmt.Errorf("key %s does not exist in store", key)
-	}
-
-	updated, err := c.eventHandler.Process(obj.(*api_v1.ConfigMap))
+func (c *Controller) processItem(cm *api_v1.ConfigMap) error {
+	updated, err := c.eventHandler.Process(cm)
 	if err != nil {
 		return err
 	}
 	if updated == nil {
 		return nil
 	}
-	_, err = c.clientset.CoreV1().ConfigMaps(updated.GetNamespace()).Update(updated)
+	_, err = c.Clientset.CoreV1().ConfigMaps(updated.GetNamespace()).Update(updated)
 	return err
-}
-
-// HasSynced is required for the cache.Controller interface.
-func (c *Controller) HasSynced() bool {
-	return c.informer.HasSynced()
 }

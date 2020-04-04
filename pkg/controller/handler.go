@@ -25,17 +25,16 @@ func (cg *AnnotationGetter) Process(cm *api_v1.ConfigMap) (*api_v1.ConfigMap, er
 
 	key, url, err := parseAnnotation(annotation)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse annotation %s: %w", annotation, err)
+		return nil, fmt.Errorf("error parse annotation %s: %w", annotation, err)
 	}
 
 	validatedURL, err := validateUrl(url)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse URL %s: %w", url, err)
+		return nil, fmt.Errorf("error parse URL %s: %w", url, err)
 	}
 	body, err := cg.Getter.Get(validatedURL)
 	if err != nil {
-		// TODO: replace with better error-handling
-		return nil, fmt.Errorf("could not fetch %s", validatedURL)
+		return nil, err
 	}
 
 	updated := cm.DeepCopy()

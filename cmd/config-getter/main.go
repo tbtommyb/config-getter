@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,7 +46,7 @@ func main() {
 			},
 		},
 		&api_v1.ConfigMap{},
-		0, //Skip resync
+		5*time.Minute,
 		cache.Indexers{},
 	)
 

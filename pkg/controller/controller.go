@@ -36,6 +36,7 @@ type Controller struct {
 }
 
 const maxRetries = 5
+const controllerAnnotation = "x-k8s-io/curl-me-that"
 
 func New(Clientset kubernetes.Interface, handler Handler, informer cache.SharedIndexInformer, logger Logger, recorder record.EventRecorder) *Controller {
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
@@ -50,14 +51,16 @@ func New(Clientset kubernetes.Interface, handler Handler, informer cache.SharedI
 		},
 		UpdateFunc: func(old, new interface{}) {
 			oldCM := old.(*api_v1.ConfigMap)
-			oldAnnotation, present := oldCM.GetAnnotations()["x-k8s-io/curl-me-that"]
-			if present {
-				newCM := new.(*api_v1.ConfigMap)
-				newAnnotation, _ := newCM.GetAnnotations()["x-k8s-io/curl-me-that"]
-				if oldAnnotation == newAnnotation {
-					return
-				}
+			newCM := new.(*api_v1.ConfigMap)
+
+			if oldCM.ResourceVersion == newCM.ResourceVersion {
+				return
 			}
+
+			if _, present := newCM.GetAnnotations()[controllerAnnotation]; !present {
+				return
+			}
+
 			key, err := cache.MetaNamespaceKeyFunc(old)
 			if err == nil {
 				logger.Infof("Processing update for %s", key)

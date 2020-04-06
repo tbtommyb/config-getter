@@ -28,6 +28,10 @@ func (cg *AnnotationGetter) Process(cm *api_v1.ConfigMap) (*api_v1.ConfigMap, er
 		return nil, fmt.Errorf("error parse annotation %s: %w", annotation, err)
 	}
 
+	if _, exists := cm.Data[key]; exists {
+		return nil, nil
+	}
+
 	validatedURL, err := validateUrl(url)
 	if err != nil {
 		return nil, fmt.Errorf("error parse URL %s: %w", url, err)

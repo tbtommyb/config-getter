@@ -6,13 +6,11 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
 	api_v1 "k8s.io/api/core/v1"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
@@ -39,7 +37,7 @@ type Controller struct {
 
 const maxRetries = 5
 
-func New(Clientset kubernetes.Interface, handler Handler, informer cache.SharedIndexInformer, logger Logger) *Controller {
+func New(Clientset kubernetes.Interface, handler Handler, informer cache.SharedIndexInformer, logger Logger, recorder record.EventRecorder) *Controller {
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
 	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -67,11 +65,6 @@ func New(Clientset kubernetes.Interface, handler Handler, informer cache.SharedI
 			}
 		},
 	})
-
-	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(logger.Infof)
-	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: Clientset.CoreV1().Events("")})
-	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, api_v1.EventSource{Component: "config-getter-controller"})
 
 	controller := &Controller{
 		logger:       logger,

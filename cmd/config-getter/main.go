@@ -10,13 +10,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/record"
 
 	api_v1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
-	controller "github.com/tbtommyb/config-getter/pkg/controller"
+	"github.com/tbtommyb/config-getter/pkg/controller"
 	getter "github.com/tbtommyb/config-getter/pkg/getter"
 )
 
@@ -50,7 +53,12 @@ func main() {
 		cache.Indexers{},
 	)
 
-	cont := controller.New(clientset, handler, informer, logger)
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartLogging(logger.Infof)
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientset.CoreV1().Events(meta_v1.NamespaceAll)})
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, api_v1.EventSource{Component: "config-getter-controller"})
+
+	cont := controller.New(clientset, handler, informer, logger, recorder)
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)

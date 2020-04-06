@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -9,8 +10,7 @@ import (
 	api_v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-
-	// "k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 
 	core "k8s.io/client-go/testing"
 )
@@ -62,8 +62,9 @@ func TestController(t *testing.T) {
 		clientset := fake.NewSimpleClientset(cm)
 		informerFactory := informers.NewSharedInformerFactory(clientset, noResyncPeriodFunc())
 		informer := informerFactory.Core().V1().ConfigMaps()
+		recorder := record.NewFakeRecorder(20)
 
-		c := controller.New(clientset, handler, informer.Informer(), &TestLogger{})
+		c := controller.New(clientset, handler, informer.Informer(), &TestLogger{}, recorder)
 		c.HasSynced = alwaysReady
 		stopCh := make(chan struct{})
 		defer close(stopCh)
@@ -91,6 +92,65 @@ func TestController(t *testing.T) {
 		if _, present := actionConfigMap.Data[testCase.expectedKey]; !present {
 			t.Errorf("expected %s to be in data", testCase.expectedKey)
 		}
+
+		events := collectEvents(recorder.Events)
+
+		if len(events) != 0 {
+			t.Errorf("unexpected events %#v\n", events)
+		}
 	}
 
+}
+
+func TestControllerEvents(t *testing.T) {
+	testCase := &ControllerTestCase{
+		annotation:      "x-k8s-io/curl-me-that",
+		path:            "test=https://notarealwebsite12346.com",
+		expectedActions: []string{"list", "watch", "update"},
+		expectedKey:     "test",
+	}
+	expectedEventCount := 6
+
+	cm := makeConfigMap(testCase.annotation, testCase.path)
+	handler := &controller.AnnotationGetter{Getter: getter.NewHTTPGetter()}
+	clientset := fake.NewSimpleClientset(cm)
+	informerFactory := informers.NewSharedInformerFactory(clientset, noResyncPeriodFunc())
+	informer := informerFactory.Core().V1().ConfigMaps()
+	recorder := record.NewFakeRecorder(20)
+
+	c := controller.New(clientset, handler, informer.Informer(), &TestLogger{}, recorder)
+	c.HasSynced = alwaysReady
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	go c.Run(stopCh)
+
+	<-time.After(1 * time.Second)
+	stopCh <- struct{}{}
+
+	events := collectEvents(recorder.Events)
+
+	if len(events) != expectedEventCount {
+		t.Errorf("expected %d events, got %d\n", expectedEventCount, len(events))
+	}
+
+	for _, event := range events {
+		if !strings.Contains(event, "GetFailure") {
+			t.Errorf("expected GetFailure error, got %s\n", event)
+		}
+	}
+}
+
+func collectEvents(source <-chan string) []string {
+	done := false
+	events := make([]string, 0)
+	for !done {
+		select {
+		case event := <-source:
+			events = append(events, event)
+		default:
+			done = true
+		}
+	}
+	return events
 }

@@ -15,16 +15,19 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
+// Handler specifies the interface for processing each ConfigMap
 type Handler interface {
 	Process(*api_v1.ConfigMap) (*api_v1.ConfigMap, error)
 }
 
+// Logger defines the required logging operations
 type Logger interface {
 	Infof(string, ...interface{})
 	Info(...interface{})
 	Errorf(string, ...interface{})
 }
 
+// Controller specifies the core controller
 type Controller struct {
 	logger       Logger
 	Clientset    kubernetes.Interface
@@ -38,6 +41,7 @@ type Controller struct {
 const maxRetries = 5
 const controllerAnnotation = "x-k8s-io/curl-me-that"
 
+// New creates a new controller
 func New(Clientset kubernetes.Interface, handler Handler, informer cache.SharedIndexInformer, logger Logger, recorder record.EventRecorder) *Controller {
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
@@ -82,6 +86,7 @@ func New(Clientset kubernetes.Interface, handler Handler, informer cache.SharedI
 	return controller
 }
 
+// Run starts the controller and runs until a stop signal is received
 func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()

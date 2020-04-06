@@ -9,16 +9,19 @@ import (
 	api_v1 "k8s.io/api/core/v1"
 )
 
-type AnnotationGetter struct {
+// AnnotationHandler represents an entity that processes the annotation
+type AnnotationHandler struct {
 	Getter ResourceGetter
 }
 
+// ResourceGetter gets the specified resource
 type ResourceGetter interface {
 	Get(string) ([]byte, error)
 }
 
-func (cg *AnnotationGetter) Process(cm *api_v1.ConfigMap) (*api_v1.ConfigMap, error) {
-	annotation, present := cm.GetAnnotations()["x-k8s-io/curl-me-that"]
+// Process processes the config map's annotation
+func (cg *AnnotationHandler) Process(cm *api_v1.ConfigMap) (*api_v1.ConfigMap, error) {
+	annotation, present := cm.GetAnnotations()[controllerAnnotation]
 	if !present {
 		return nil, nil
 	}
@@ -32,7 +35,7 @@ func (cg *AnnotationGetter) Process(cm *api_v1.ConfigMap) (*api_v1.ConfigMap, er
 		return nil, nil
 	}
 
-	validatedURL, err := validateUrl(url)
+	validatedURL, err := validateURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("error parse URL %s: %w", url, err)
 	}
@@ -63,7 +66,7 @@ func parseAnnotation(annotation string) (string, string, error) {
 	return x[0], x[1], nil
 }
 
-func validateUrl(path string) (string, error) {
+func validateURL(path string) (string, error) {
 	if !(strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://")) {
 		path = "https://" + path
 	}

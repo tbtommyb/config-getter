@@ -28,7 +28,7 @@ func (trg *TestResourceGetter) Get(url string) ([]byte, error) {
 }
 
 func TestProcessWithNonMatchingAnnotation(t *testing.T) {
-	handler := &controller.AnnotationGetter{Getter: &TestResourceGetter{}}
+	handler := &controller.AnnotationHandler{Getter: &TestResourceGetter{}}
 	cm := makeConfigMap("test-annotation", "")
 
 	actual, err := handler.Process(cm)
@@ -39,7 +39,7 @@ func TestProcessWithNonMatchingAnnotation(t *testing.T) {
 }
 
 func TestProcessWithInvalidAnnotations(t *testing.T) {
-	handler := &controller.AnnotationGetter{Getter: &TestResourceGetter{}}
+	handler := &controller.AnnotationHandler{Getter: &TestResourceGetter{}}
 
 	testCases := []string{
 		"",
@@ -64,7 +64,7 @@ type validPathTestCase struct {
 }
 
 func TestProcessWithValidPaths(t *testing.T) {
-	handler := &controller.AnnotationGetter{Getter: &TestResourceGetter{}}
+	handler := &controller.AnnotationHandler{Getter: &TestResourceGetter{}}
 
 	testCases := []validPathTestCase{
 		{

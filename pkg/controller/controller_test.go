@@ -58,7 +58,7 @@ func TestController(t *testing.T) {
 	for _, testCase := range testCases {
 		cm := makeConfigMap(testCase.annotation, testCase.path)
 
-		handler := &controller.AnnotationGetter{Getter: getter.NewHTTPGetter()}
+		handler := &controller.AnnotationHandler{Getter: getter.NewHTTPGetter()}
 		clientset := fake.NewSimpleClientset(cm)
 		informerFactory := informers.NewSharedInformerFactory(clientset, noResyncPeriodFunc())
 		informer := informerFactory.Core().V1().ConfigMaps()
@@ -112,7 +112,7 @@ func TestControllerEvents(t *testing.T) {
 	expectedEventCount := 6
 
 	cm := makeConfigMap(testCase.annotation, testCase.path)
-	handler := &controller.AnnotationGetter{Getter: getter.NewHTTPGetter()}
+	handler := &controller.AnnotationHandler{Getter: getter.NewHTTPGetter()}
 	clientset := fake.NewSimpleClientset(cm)
 	informerFactory := informers.NewSharedInformerFactory(clientset, noResyncPeriodFunc())
 	informer := informerFactory.Core().V1().ConfigMaps()

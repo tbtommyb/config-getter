@@ -38,7 +38,7 @@ func main() {
 	}
 
 	logger := logrus.WithField("pkg", "config-getter")
-	handler := &controller.AnnotationGetter{Getter: getter.NewHTTPGetter()}
+	handler := &controller.AnnotationHandler{Getter: getter.NewHTTPGetter()}
 	informer := cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
